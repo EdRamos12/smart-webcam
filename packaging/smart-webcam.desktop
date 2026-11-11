@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Smart Webcam
+GenericName=Phone webcam
+Comment=Use your Android phone as a webcam
+Exec=smart-webcam window
+Icon=camera-web
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=webcam;camera;phone;android;v4l2loopback;

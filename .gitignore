@@ -1,0 +1,4 @@
+desktop/target/
+packaging/src/
+packaging/pkg/
+packaging/*.pkg.tar.*

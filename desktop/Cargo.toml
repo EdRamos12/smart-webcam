@@ -1,0 +1,25 @@
+[package]
+name = "smart-webcam"
+version = "0.1.0"
+edition = "2024"
+description = "Use your Android phone as a webcam: tray app feeding a v4l2loopback device"
+
+[dependencies]
+anyhow = "1.0.104"
+dirs = "7.0.0"
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
+env_logger = "0.11.11"
+font8x8 = "0.3.1"
+ksni = "0.3.7"
+libc = "0.2.191"
+log = "0.4.34"
+mdns-sd = "0.21.6"
+openh264 = "0.9.9"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "process", "signal"] }
+toml = "1.1.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

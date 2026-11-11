@@ -1,0 +1,33 @@
+# Local package: run `makepkg -si` from this directory.
+pkgname=smart-webcam
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Use your Android phone as a webcam (tray app + v4l2loopback)"
+arch=('x86_64')
+license=('LicenseRef-unspecified')
+depends=('v4l2loopback-dkms' 'v4l2loopback-utils' 'android-tools' 'polkit' 'gcc-libs')
+makedepends=('cargo' 'gcc')
+optdepends=('ffmpeg: ffplay for debugging the stream')
+options=('!lto')
+
+_src="$startdir/.."
+
+build() {
+  cd "$_src/desktop"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --locked
+}
+
+check() {
+  cd "$_src/desktop"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo test --release --locked
+}
+
+package() {
+  install -Dm755 "$srcdir/target/release/smart-webcam" "$pkgdir/usr/bin/smart-webcam"
+  install -Dm644 "$_src/packaging/smart-webcam.desktop" "$pkgdir/usr/share/applications/smart-webcam.desktop"
+  # Vendor locations; `smart-webcam setup` writes the same files to /etc on non-packaged installs.
+  install -Dm644 "$_src/packaging/smart-webcam-modprobe.conf" "$pkgdir/usr/lib/modprobe.d/smart-webcam.conf"
+  install -Dm644 "$_src/packaging/smart-webcam-modules-load.conf" "$pkgdir/usr/lib/modules-load.d/smart-webcam.conf"
+}
