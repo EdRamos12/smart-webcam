@@ -71,3 +71,7 @@ cd desktop && cargo test      # protocol framing, YUV conversion/rotation, place
 - Decoding is in software (OpenH264): about 25–30% of one core for 1080p30.
 - The phone app has no camera preview; settings are controlled from the PC (tray or window).
 - If another app on the phone (e.g. face unlock) takes the camera, the stream pauses and resumes on its own.
+
+## TODO
+
+- Windows installer (MSI): install the app, add a desktop shortcut and Start menu entry, and run the one-time virtual-camera registration during setup (and remove it on uninstall). That registration should publish a **Smart Webcam** camera, so Windows no longer depends on the OBS Virtual Camera.
