@@ -1,9 +1,9 @@
 # Smart Webcam
 
-Use an Android phone as a real webcam on Linux. It replaces the IP Webcam + OBS + virtual camera chain with two small apps:
+Use an Android phone as a real webcam on Linux or Windows. It replaces the IP Webcam + OBS + virtual camera chain with two small apps:
 
 - **`android/`**: Kotlin app. Camera2 feeds the hardware H.264 encoder, which streams over TCP. The camera only opens while a PC is connected.
-- **`desktop/`**: Rust tray app (`smart-webcam`). It finds the phone over USB (adb) or Wi-Fi (mDNS), decodes with OpenH264 and writes to a v4l2loopback device named **"Smart Webcam"**. Zoom, Meet, Discord, OBS and browsers see it as a normal camera.
+- **`desktop/`**: Rust tray app (`smart-webcam`). It finds the phone over USB (adb) or Wi-Fi (mDNS) and decodes with OpenH264. On Linux it writes a v4l2loopback device named **"Smart Webcam"**. On Windows it feeds the **OBS Virtual Camera** (install [OBS Studio](https://obsproject.com/) once). Zoom, Meet, Discord, OBS and browsers see it as a normal camera.
 
 The wire protocol is documented in [`protocol/PROTOCOL.md`](protocol/PROTOCOL.md).
 
@@ -26,6 +26,19 @@ cargo build --release
 ./target/release/smart-webcam window    # preview/settings window (starts the tray app if needed)
 ```
 Or build an Arch package: `cd packaging && makepkg -si`.
+
+### Windows
+Install [OBS Studio](https://obsproject.com/) once, plus Rust and a MinGW UCRT GCC (OpenH264 is compiled from source; NASM is optional and makes decoding faster). Then:
+
+```powershell
+cd desktop
+cargo build --release
+.\target\release\smart-webcam.exe setup    # registers OBS Virtual Camera if it isn't already (UAC prompt)
+.\target\release\smart-webcam.exe          # tray app
+.\target\release\smart-webcam.exe window   # preview/settings window
+```
+
+The camera shows up in other apps as **OBS Virtual Camera**. Quit OBS's own "Start Virtual Camera" while Smart Webcam is running — they share one camera. Settings are saved in `%APPDATA%\smart-webcam\config.toml`. The window talks to the tray app over `127.0.0.1` (the port is in `%TEMP%\smart-webcam.port`).
 
 `setup` writes `/etc/modules-load.d/smart-webcam.conf` and `/etc/modprobe.d/smart-webcam.conf`, so the device survives reboots. It also creates a second device for OBS's own virtual camera. The tray app runs setup automatically on first start if the device is missing.
 
@@ -54,7 +67,7 @@ cd desktop && cargo test      # protocol framing, YUV conversion/rotation, place
 ```
 
 ## Notes / limits (v1)
-- Video only (no audio). Linux only for now; the tray (`tray::Tray`) and the virtual camera (`vcam::VirtualCamera`) are traits so a Windows backend can be added.
+- Video only (no audio). Linux uses v4l2loopback; Windows uses the OBS Virtual Camera DirectShow filter. The tray (`tray::Tray`) and the virtual camera (`vcam::VirtualCamera`) are traits.
 - Decoding is in software (OpenH264): about 25–30% of one core for 1080p30.
 - The phone app has no camera preview; settings are controlled from the PC (tray or window).
 - If another app on the phone (e.g. face unlock) takes the camera, the stream pauses and resumes on its own.

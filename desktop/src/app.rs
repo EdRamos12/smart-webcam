@@ -126,7 +126,18 @@ impl App {
             width: w as usize,
             height: h as usize,
             fps: cfg.fps,
-            pixel: cfg.pixel_format,
+            // OBS Virtual Camera consumes NV12. I420 converts into that with a
+            // copy; YUYV would be unpacked and packed again on every frame.
+            pixel: {
+                #[cfg(windows)]
+                {
+                    crate::config::PixelFormat::I420
+                }
+                #[cfg(not(windows))]
+                {
+                    cfg.pixel_format
+                }
+            },
             mirror: cfg.mirror,
             rotation: cfg.rotation,
         }
@@ -161,7 +172,7 @@ impl App {
                     self.device_info = d;
                 }
                 Event::Video(VideoEvent::DeviceError(e)) => {
-                    self.device_info = "no virtual camera".into();
+                    self.device_info = e.lines().next().unwrap_or("no virtual camera").to_string();
                     self.device_error = Some(e);
                 }
                 Event::Tick => {
@@ -484,7 +495,7 @@ impl App {
             Status::Denied(_) => ("Access denied on the phone".to_string(), "Access denied on the phone".to_string(), TrayIcon::Error),
         };
         let (status, icon) = match &self.device_error {
-            Some(_) => (format!("{status} — no virtual camera (run setup)"), TrayIcon::Error),
+            Some(_) => (format!("{status} — {}", self.device_info), TrayIcon::Error),
             None => (status, icon),
         };
         self.video.send(VideoMsg::Status(placeholder));

@@ -6,7 +6,6 @@ use crate::tray::{Command, TrayIcon, TrayState};
 use crate::video::Preview;
 use anyhow::{Context, Result};
 use eframe::egui::{self, Color32, RichText};
-use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,7 +16,7 @@ const QUALITY: [(&str, u32); 4] = [("Low", 4_000_000), ("Normal", 8_000_000), ("
 struct Shared {
     state: Option<TrayState>,
     preview: Option<Preview>,
-    writer: Option<UnixStream>,
+    writer: Option<ipc::Stream>,
 }
 
 pub fn run() -> Result<()> {
@@ -339,7 +338,8 @@ impl Window {
         }
         if st.device_missing {
             ui.add_space(6.0);
-            ui.colored_label(Color32::from_rgb(220, 120, 60), "The virtual camera device is missing.");
+            let msg = if st.device.is_empty() { "The virtual camera is not available.".into() } else { st.device.clone() };
+            ui.colored_label(Color32::from_rgb(220, 120, 60), msg);
             if ui.button("Set up virtual camera…").clicked() {
                 self.send(Command::RunSetup);
             }

@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "linux")]
 pub mod ksni;
+#[cfg(windows)]
+pub mod windows;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TrayIcon {

@@ -1,8 +1,10 @@
-//! Local socket between the tray app (server) and the settings/preview window (client).
+//! Local connection between the tray app (server) and the settings/preview window (client).
 //!
-//! Frames reuse the `[u8 type][u32 len][payload]` layout of the phone protocol:
-//! type 1 = JSON (`TrayState` to the window, `Command` from it),
-//! type 2 = preview: `u32 width, u32 height, u64 written_us` + RGB bytes.
+//! Linux uses a Unix socket in `$XDG_RUNTIME_DIR`. Windows uses a TCP port on
+//! 127.0.0.1, with the port number written next to the socket path so the
+//! window can find it. Frames reuse the `[u8 type][u32 len][payload]` layout of
+//! the phone protocol: type 1 = JSON (`TrayState` to the window, `Command` from
+//! it), type 2 = preview: `u32 width, u32 height, u64 written_us` + RGB bytes.
 
 use crate::protocol::encode_frame;
 use crate::tray::{Command, TrayState};
@@ -12,16 +14,34 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
-use tokio::net::UnixListener;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc::UnboundedSender, watch};
+
+#[cfg(unix)]
+use tokio::net::UnixListener;
+#[cfg(windows)]
+use tokio::net::TcpListener;
 
 const TYPE_JSON: u8 = 1;
 const TYPE_PREVIEW: u8 = 2;
 const MAX_FRAME: usize = 64 << 20;
 
-pub fn socket_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("smart-webcam.sock")
+#[cfg(unix)]
+pub type Stream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+pub type Stream = std::net::TcpStream;
+
+/// Socket path on Linux, port file on Windows. Removed when the tray app exits.
+pub fn endpoint_path() -> PathBuf {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    #[cfg(unix)]
+    {
+        dir.join("smart-webcam.sock")
+    }
+    #[cfg(windows)]
+    {
+        dir.join("smart-webcam.port")
+    }
 }
 
 fn encode_preview(p: &Preview) -> Vec<u8> {
@@ -34,18 +54,34 @@ fn encode_preview(p: &Preview) -> Vec<u8> {
 }
 
 /// Serves windows until the process exits. Only called while holding the single-instance lock,
-/// so removing a stale socket file is safe.
+/// so removing a stale endpoint is safe.
 pub async fn serve(
     state: watch::Receiver<TrayState>,
     preview: watch::Receiver<Option<Arc<Preview>>>,
     viewers: Arc<AtomicUsize>,
     commands: UnboundedSender<Command>,
 ) -> Result<()> {
-    let path = socket_path();
-    let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path)?;
+    #[cfg(unix)]
+    let listener = {
+        let path = endpoint_path();
+        let _ = std::fs::remove_file(&path);
+        UnixListener::bind(&path)?
+    };
+    #[cfg(windows)]
+    let listener = {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        std::fs::write(endpoint_path(), listener.local_addr()?.port().to_string())?;
+        listener
+    };
     loop {
-        let (stream, _) = listener.accept().await?;
+        #[cfg(unix)]
+        let stream = listener.accept().await?.0;
+        #[cfg(windows)]
+        let stream = {
+            let (stream, _) = listener.accept().await?;
+            let _ = stream.set_nodelay(true);
+            stream
+        };
         let (state, preview, viewers, commands) = (state.clone(), preview.clone(), viewers.clone(), commands.clone());
         tokio::spawn(async move {
             viewers.fetch_add(1, Ordering::Relaxed);
@@ -57,13 +93,16 @@ pub async fn serve(
     }
 }
 
-async fn serve_client(
-    stream: tokio::net::UnixStream,
+async fn serve_client<S>(
+    stream: S,
     mut state: watch::Receiver<TrayState>,
     mut preview: watch::Receiver<Option<Arc<Preview>>>,
     commands: UnboundedSender<Command>,
-) -> Result<()> {
-    let (mut rd, mut wr) = stream.into_split();
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut rd, mut wr) = tokio::io::split(stream);
     let mut reader = tokio::spawn(async move {
         loop {
             match crate::protocol::read_frame(&mut rd).await? {
@@ -109,15 +148,15 @@ pub enum Incoming {
 
 /// Blocking client used by the window.
 pub struct Client {
-    stream: std::os::unix::net::UnixStream,
+    stream: Stream,
 }
 
 impl Client {
     pub fn connect() -> std::io::Result<Client> {
-        Ok(Client { stream: std::os::unix::net::UnixStream::connect(socket_path())? })
+        Ok(Client { stream: connect_stream()? })
     }
 
-    pub fn writer(&self) -> std::io::Result<std::os::unix::net::UnixStream> {
+    pub fn writer(&self) -> std::io::Result<Stream> {
         self.stream.try_clone()
     }
 
@@ -147,7 +186,25 @@ impl Client {
     }
 }
 
-pub fn send_command(stream: &mut std::os::unix::net::UnixStream, cmd: &Command) -> std::io::Result<()> {
+fn connect_stream() -> std::io::Result<Stream> {
+    #[cfg(unix)]
+    {
+        Stream::connect(endpoint_path())
+    }
+    #[cfg(windows)]
+    {
+        let text = std::fs::read_to_string(endpoint_path())?;
+        let port: u16 = text
+            .trim()
+            .parse()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let stream = Stream::connect((std::net::Ipv4Addr::LOCALHOST, port))?;
+        stream.set_nodelay(true)?;
+        Ok(stream)
+    }
+}
+
+pub fn send_command(stream: &mut Stream, cmd: &Command) -> std::io::Result<()> {
     let json = serde_json::to_vec(cmd).map_err(std::io::Error::other)?;
     stream.write_all(&encode_frame(TYPE_JSON, &json))
 }

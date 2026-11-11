@@ -132,20 +132,43 @@ impl Config {
 
 fn random_id() -> String {
     let mut buf = [0u8; 16];
-    if std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf)).is_err() {
+    if !fill_random(&mut buf) {
         let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         buf[..16].copy_from_slice(&t.as_nanos().to_le_bytes());
     }
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn fill_random(buf: &mut [u8]) -> bool {
+    #[cfg(unix)]
+    {
+        std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, buf)).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        // RtlGenRandom. Documented for this use by the Win32 `SystemFunction036` export.
+        #[link(name = "advapi32")]
+        unsafe extern "system" {
+            fn SystemFunction036(buf: *mut u8, len: u32) -> u8;
+        }
+        unsafe { SystemFunction036(buf.as_mut_ptr(), buf.len() as u32) != 0 }
+    }
+}
+
 pub fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
-        .map(|s| s.trim().to_string())
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "PC".into())
+    #[cfg(windows)]
+    {
+        return std::env::var("COMPUTERNAME").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "PC".into());
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+            .map(|s| s.trim().to_string())
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "PC".into())
+    }
 }
 
 #[cfg(test)]

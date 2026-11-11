@@ -30,7 +30,7 @@ USAGE:
     smart-webcam [--device /dev/videoN]              run in the system tray
     smart-webcam window                              open the preview/settings window
     smart-webcam headless [TARGET] [--device ...]    run without a tray (logs to stderr)
-    smart-webcam setup                               create the \"Smart Webcam\" v4l2loopback device
+    smart-webcam setup                               create the virtual camera (v4l2loopback on Linux, OBS Virtual Camera on Windows)
     smart-webcam dump TARGET OUT.h264 [SECONDS]      save the raw H.264 stream (debugging)
     smart-webcam devices                             list phones and video devices
 
@@ -113,17 +113,51 @@ async fn parse_target(s: &str) -> Result<Target> {
     Ok(Target::Addr { addr: s.into() })
 }
 
-/// Holds an exclusive lock for the process lifetime so only one instance drives the device.
-fn single_instance() -> Result<std::fs::File> {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    let path = dir.join("smart-webcam.lock");
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path)?;
-    use std::os::fd::AsRawFd;
-    // SAFETY: plain flock on a file descriptor we own.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        bail!("Smart Webcam is already running");
+/// Held for the process lifetime so only one instance drives the camera.
+struct InstanceLock {
+    #[cfg(unix)]
+    _file: std::fs::File,
+    #[cfg(windows)]
+    mutex: usize,
+}
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.mutex as *mut std::ffi::c_void);
+        }
     }
-    Ok(file)
+}
+
+fn single_instance() -> Result<InstanceLock> {
+    #[cfg(unix)]
+    {
+        let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let path = dir.join("smart-webcam.lock");
+        let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path)?;
+        use std::os::fd::AsRawFd;
+        // SAFETY: plain flock on a file descriptor we own.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            bail!("Smart Webcam is already running");
+        }
+        Ok(InstanceLock { _file: file })
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+        let name = windows_sys::w!("Local\\smart-webcam");
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 1, name) };
+        if handle.is_null() {
+            bail!("CreateMutexW failed ({})", unsafe { GetLastError() });
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe { CloseHandle(handle) };
+            bail!("Smart Webcam is already running");
+        }
+        Ok(InstanceLock { mutex: handle as usize })
+    }
 }
 
 async fn run(device: Option<PathBuf>, target: Option<Target>, with_tray: bool) -> Result<()> {
@@ -135,8 +169,20 @@ async fn run(device: Option<PathBuf>, target: Option<Target>, with_tray: bool) -
 
     // Virtual camera. If the device is missing, offer the one-time setup.
     // `--device` is a one-off override; it is never written to the config.
-    let vcam_device = device.or_else(|| cfg.device.clone());
-    if vcam_device.is_none() && vcam::v4l2loopback::find_device().is_none() && with_tray {
+    let vcam_device = {
+        #[cfg(windows)]
+        {
+            if device.is_some() {
+                log::warn!("--device is the Linux v4l2 path and is ignored on Windows");
+            }
+            None
+        }
+        #[cfg(not(windows))]
+        {
+            device.or_else(|| cfg.device.clone())
+        }
+    };
+    if vcam::needs_setup(&vcam_device) && with_tray {
         if let Err(e) = tokio::task::spawn_blocking(setup::ensure_device).await? {
             log::warn!("{e:#}");
         }
@@ -166,7 +212,18 @@ async fn run(device: Option<PathBuf>, target: Option<Target>, with_tray: bool) -
     // Tray (or a logger in headless mode). Tray commands go to the same event queue.
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
     let tray: Box<dyn Tray> = if with_tray {
-        Box::new(tray::ksni::KsniTray::spawn(cmd_tx.clone()).await?)
+        #[cfg(target_os = "linux")]
+        {
+            Box::new(tray::ksni::KsniTray::spawn(cmd_tx.clone()).await?)
+        }
+        #[cfg(windows)]
+        {
+            Box::new(tray::windows::WindowsTray::spawn(cmd_tx.clone()).await?)
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
+        {
+            bail!("no tray implementation for this operating system");
+        }
     } else {
         Box::new(tray::LogTray::default())
     };
@@ -205,7 +262,7 @@ async fn run(device: Option<PathBuf>, target: Option<Target>, with_tray: bool) -
     });
 
     App::new(cfg, tray, video, phones, tx, ui_tx).run(rx).await;
-    let _ = std::fs::remove_file(ipc::socket_path());
+    let _ = std::fs::remove_file(ipc::endpoint_path());
     let _ = tokio::task::spawn_blocking(move || video_thread.join()).await;
     Ok(())
 }
@@ -313,8 +370,9 @@ async fn list_devices() -> Result<()> {
     }
     let _ = daemon.shutdown();
     println!("Video devices:");
-    for (path, name) in vcam::v4l2loopback::devices() {
-        let mark = if name == vcam::v4l2loopback::CARD_LABEL { "  <- Smart Webcam" } else { "" };
+    let ours = vcam::our_device_name();
+    for (path, name) in vcam::devices() {
+        let mark = if name == ours { "  <- Smart Webcam" } else { "" };
         println!("  {}  {name}{mark}", path.display());
     }
     Ok(())

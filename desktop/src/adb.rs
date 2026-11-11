@@ -15,9 +15,36 @@ pub struct UsbDevice {
 }
 
 fn adb() -> Command {
-    let mut c = Command::new(std::env::var_os("ADB").unwrap_or_else(|| "adb".into()));
+    let mut c = Command::new(adb_program());
     c.kill_on_drop(true);
     c
+}
+
+/// `ADB` if set, otherwise `adb` on `PATH`. On Windows also check the SDK
+/// locations, since a newly installed platform-tools folder is often missing
+/// from the PATH of apps launched from the desktop.
+fn adb_program() -> std::ffi::OsString {
+    if let Some(p) = std::env::var_os("ADB") {
+        if !p.is_empty() {
+            return p;
+        }
+    }
+    #[cfg(windows)]
+    if let Some(p) = windows_adb() {
+        return p;
+    }
+    "adb".into()
+}
+
+#[cfg(windows)]
+fn windows_adb() -> Option<std::ffi::OsString> {
+    let local = std::env::var_os("LOCALAPPDATA")?;
+    let local = std::path::PathBuf::from(local);
+    let candidates = [
+        local.join("Android").join("platform-tools").join("adb.exe"),
+        local.join("Android").join("Sdk").join("platform-tools").join("adb.exe"),
+    ];
+    candidates.into_iter().find(|p| p.is_file()).map(std::path::PathBuf::into_os_string)
 }
 
 async fn run(args: &[&str]) -> Result<String> {
